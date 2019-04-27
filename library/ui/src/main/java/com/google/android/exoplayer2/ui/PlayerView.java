@@ -767,7 +767,7 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
     updateErrorMessage();
   }
 
-  @Override
+  /*@Override
   public boolean dispatchKeyEvent(KeyEvent event) {
     if (player != null && player.isPlayingAd()) {
       return super.dispatchKeyEvent(event);
@@ -780,7 +780,7 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
       maybeShowController(true);
     }
     return handled;
-  }
+  }*/
 
   /**
    * Called to process media key events. Any {@link KeyEvent} can be passed but only media key
@@ -1353,6 +1353,19 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
         || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
         || keyCode == KeyEvent.KEYCODE_DPAD_UP_LEFT
         || keyCode == KeyEvent.KEYCODE_DPAD_CENTER;
+  }
+
+  private List<ExoEpgItem> epgChannelData;
+
+  public void setEpgChannelData(List<ExoEpgItem> epgChannelData) {
+    this.epgChannelData = epgChannelData;
+    if (controller != null)
+      controller.setEpgChannelData(epgChannelData);
+  }
+
+  public void setSeekListener(PlayerControlView.OnSeekListener seekListener) {
+    if (controller != null)
+      controller.mOnSeekListener = seekListener;
   }
 
   private final class ComponentListener

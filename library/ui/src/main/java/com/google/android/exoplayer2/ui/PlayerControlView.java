@@ -20,10 +20,13 @@ import android.content.Context;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.graphics.drawable.Drawable;
+import android.os.Handler;
 import android.os.Looper;
+import android.os.Message;
 import android.os.SystemClock;
 import android.support.annotation.Nullable;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -41,7 +44,9 @@ import com.google.android.exoplayer2.util.RepeatModeUtil;
 import com.google.android.exoplayer2.util.Util;
 import java.util.Arrays;
 import java.util.Formatter;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 
 /**
  * A view for controlling {@link Player} instances.
@@ -167,6 +172,19 @@ public class PlayerControlView extends FrameLayout {
     ExoPlayerLibraryInfo.registerModule("goog.exo.ui");
   }
 
+  private final TextView timeToSeek;
+  private final TextView epgName;
+
+  private List<ExoEpgItem> epgChannelData;
+
+  public List<ExoEpgItem> getEpgChannelData() {
+    return epgChannelData;
+  }
+
+  public void setEpgChannelData(List<ExoEpgItem> epgChannelData) {
+    this.epgChannelData = epgChannelData;
+  }
+
   /** Listener to be notified about changes of the visibility of the UI control. */
   public interface VisibilityListener {
 
@@ -179,11 +197,8 @@ public class PlayerControlView extends FrameLayout {
   }
 
   /** The default fast forward increment, in milliseconds. */
-  public static final int DEFAULT_FAST_FORWARD_MS = 15000;
   /** The default rewind increment, in milliseconds. */
-  public static final int DEFAULT_REWIND_MS = 5000;
   /** The default show timeout, in milliseconds. */
-  public static final int DEFAULT_SHOW_TIMEOUT_MS = 5000;
   /** The default repeat toggle modes. */
   public static final @RepeatModeUtil.RepeatToggleModes int DEFAULT_REPEAT_TOGGLE_MODES =
       RepeatModeUtil.REPEAT_TOGGLE_MODE_NONE;
@@ -344,6 +359,9 @@ public class PlayerControlView extends FrameLayout {
         resources.getString(R.string.exo_controls_repeat_one_description);
     repeatAllButtonContentDescription =
         resources.getString(R.string.exo_controls_repeat_all_description);
+
+    timeToSeek = findViewById(R.id.exo_time_to_seek);
+    epgName = findViewById(R.id.exo_epg_name);
   }
 
   @SuppressWarnings("ResourceType")
@@ -642,7 +660,7 @@ public class PlayerControlView extends FrameLayout {
     setButtonEnabled(fastForwardMs > 0 && isSeekable, fastForwardButton);
     setButtonEnabled(rewindMs > 0 && isSeekable, rewindButton);
     if (timeBar != null) {
-      timeBar.setEnabled(isSeekable);
+      timeBar.setEnabled(false);
     }
   }
 
@@ -709,6 +727,7 @@ public class PlayerControlView extends FrameLayout {
     long position = 0;
     long bufferedPosition = 0;
     long duration = 0;
+
     if (player != null) {
       long currentWindowTimeBarOffsetMs = 0;
       long durationUs = 0;
@@ -771,6 +790,32 @@ public class PlayerControlView extends FrameLayout {
         timeBar.setAdGroupTimesMs(adGroupTimesMs, playedAdGroups, totalAdGroupCount);
       }
     }
+
+    if(epgChannelData != null && !epgChannelData.isEmpty()) {
+      /*duration = 0;*/
+      Long playedTime = 0L;
+      Long delta = epgChannelData.get(0).getStart();
+      ExoEpgItem current = null;
+      for (int i = 0; i < epgChannelData.size(); i++) {
+        ExoEpgItem exoEpgItem = epgChannelData.get(i);
+        playedTime = exoEpgItem.getStart() - delta;
+        if (position / 1000 > exoEpgItem.getStart() - delta && position / 1000 < exoEpgItem.getFinish() - delta) {
+          duration = (exoEpgItem.getFinish() - exoEpgItem.getStart()) * 1000;
+          current = exoEpgItem;
+          break;
+        }
+      }
+
+      playedTime *= 1000;
+      position = player.getCurrentPosition() - playedTime;
+
+      epgName.setVisibility(VISIBLE);
+      if (current != null)
+        epgName.setText(current.getName());
+    } else {
+      epgName.setVisibility(GONE);
+    }
+
     if (durationView != null) {
       durationView.setText(Util.getStringForTime(formatBuilder, formatter, duration));
     }
@@ -952,7 +997,86 @@ public class PlayerControlView extends FrameLayout {
 
   @Override
   public boolean dispatchKeyEvent(KeyEvent event) {
-    return dispatchMediaKeyEvent(event) || super.dispatchKeyEvent(event);
+    boolean handled = dispatchMediaKeyEvent(event) || super.dispatchKeyEvent(event);
+    if (handled) {
+      show();
+    }
+    return handled;
+  }
+
+  public static final int DEFAULT_FAST_FORWARD_MS = 60 * 1000;
+  public static final int DEFAULT_VERY_FAST_FORWARD_MS = 10 * 60 * 1000;
+  public static final int DEFAULT_REWIND_MS = 10 * 1000;
+  public static final int DEFAULT_SHOW_TIMEOUT_MS = 10000;
+  public static final int SUNDUK_STEP_1 = 10 * 1000;
+  public static final int SUNDUK_STEP_2 = 60 *1000;
+  public static final int SUNDUK_STEP_3 = 10 * 60 *1000;
+
+  private static final int MESSAGE_CHANGE_TIME = 100;
+  private long addValue = 0;
+
+  public OnSeekListener mOnSeekListener;
+  public interface OnSeekListener{
+    void seek(long value);
+  }
+
+
+  private final Handler mHandler = new Handler() {
+    @Override
+    public void handleMessage(Message msg) {
+      if(player.getDuration() <=0){
+        if(mOnSeekListener != null)
+          mOnSeekListener.seek(addValue);
+      }else {
+        if (addValue > 0) {
+          Log.d("PlaybackControlView", "Seek to > 0: " + addValue);
+          seekTo(Math.min(player.getCurrentPosition() + addValue, player.getDuration()));
+        }
+        if (addValue < 0) {
+          Log.d("PlaybackControlView", "Seek to < 0: " + addValue);
+          seekTo(Math.max(player.getCurrentPosition() + addValue, 0));
+        }
+      }
+      addValue = 0;
+      Log.d("PlaybackControlView", "Reset time: " + addValue);
+      if(timeToSeek != null) {
+        timeToSeek.setText(null);
+        timeToSeek.setVisibility(INVISIBLE);
+      }
+    }
+  };
+
+  private void forward(long value) {
+    addValue += value;
+    mHandler.removeMessages(MESSAGE_CHANGE_TIME);
+    mHandler.sendMessageDelayed(mHandler.obtainMessage(MESSAGE_CHANGE_TIME, value), 2 * 1000);
+    Log.d("PlaybackControlView", "Change time: " + addValue);
+    setSeekToTimeText();
+  }
+
+  private void setSeekToTimeText() {
+    if (timeToSeek != null && timeToSeek.getVisibility() != VISIBLE) {
+      timeToSeek.setVisibility(VISIBLE);
+    }
+    String text = "";
+    long hours = TimeUnit.MILLISECONDS.toHours(Math.abs(addValue));
+    long min = TimeUnit.MILLISECONDS.toMinutes(Math.abs(addValue)) % 60;
+    long sec = TimeUnit.MILLISECONDS.toSeconds(Math.abs(addValue)) % 60;
+    if (addValue >= 0) {
+      text = String.format(Locale.getDefault(), "+ %d:%02d:%02d", hours, min, sec);
+    } else {
+      text = String.format(Locale.getDefault(), "- %d:%02d:%02d", hours, min, sec);
+    }
+    if (timeToSeek != null)
+      timeToSeek.setText(text);
+  }
+
+  private void rewind(long value) {
+    addValue -= value;
+    mHandler.removeMessages(MESSAGE_CHANGE_TIME);
+    mHandler.sendMessageDelayed(mHandler.obtainMessage(MESSAGE_CHANGE_TIME, value), 2 * 1000);
+    Log.d("PlaybackControlView", "Change time: " + addValue);
+    setSeekToTimeText();
   }
 
   /**
@@ -964,36 +1088,80 @@ public class PlayerControlView extends FrameLayout {
    */
   public boolean dispatchMediaKeyEvent(KeyEvent event) {
     int keyCode = event.getKeyCode();
-    if (player == null || !isHandledMediaKey(keyCode)) {
+    if (player == null || !isHandledMediaKey(keyCode) || event.getAction() != KeyEvent.ACTION_UP) {
       return false;
     }
-    if (event.getAction() == KeyEvent.ACTION_DOWN) {
-      if (keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) {
-        fastForward();
-      } else if (keyCode == KeyEvent.KEYCODE_MEDIA_REWIND) {
-        rewind();
-      } else if (event.getRepeatCount() == 0) {
-        switch (keyCode) {
-          case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-            controlDispatcher.dispatchSetPlayWhenReady(player, !player.getPlayWhenReady());
-            break;
-          case KeyEvent.KEYCODE_MEDIA_PLAY:
-            controlDispatcher.dispatchSetPlayWhenReady(player, true);
-            break;
-          case KeyEvent.KEYCODE_MEDIA_PAUSE:
-            controlDispatcher.dispatchSetPlayWhenReady(player, false);
-            break;
-          case KeyEvent.KEYCODE_MEDIA_NEXT:
-            next();
-            break;
-          case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
-            previous();
-            break;
-          default:
-            break;
-        }
+    if (event.getAction() == KeyEvent.ACTION_UP) {
+      switch (keyCode) {
+        case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+          if (isVisible())
+            forward(SUNDUK_STEP_2);
+          show();
+          break;
+        case KeyEvent.KEYCODE_MEDIA_REWIND:
+          if (isVisible())
+            rewind(SUNDUK_STEP_2);
+          show();
+          break;
+        case KeyEvent.KEYCODE_DPAD_UP:
+          if (isVisible())
+            forward(SUNDUK_STEP_2);
+          show();
+          break;
+        case KeyEvent.KEYCODE_DPAD_DOWN:
+          if (isVisible())
+            rewind(SUNDUK_STEP_2);
+          show();
+          break;
+        case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+          show();
+          player.setPlayWhenReady(!player.getPlayWhenReady());
+          break;
+        case KeyEvent.KEYCODE_MEDIA_PLAY:
+          show();
+          player.setPlayWhenReady(true);
+          break;
+        case KeyEvent.KEYCODE_MEDIA_PAUSE:
+          show();
+          player.setPlayWhenReady(false);
+          break;
+        case KeyEvent.KEYCODE_DPAD_LEFT:
+          if (isVisible())
+            rewind(SUNDUK_STEP_1);
+          show();
+          break;
+        case KeyEvent.KEYCODE_DPAD_RIGHT:
+          if (isVisible())
+            forward(SUNDUK_STEP_1);
+          show();
+          break;
+        case KeyEvent.KEYCODE_PAGE_DOWN:
+          show();
+          rewind(SUNDUK_STEP_3);
+          break;
+        case KeyEvent.KEYCODE_PAGE_UP:
+          show();
+          forward(SUNDUK_STEP_3);
+          break;
+        case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+          if (isVisible())
+            rewind(SUNDUK_STEP_3);
+          show();
+          break;
+        case KeyEvent.KEYCODE_MEDIA_NEXT:
+          if (isVisible())
+            forward(SUNDUK_STEP_3);
+          show();
+          break;
+        case KeyEvent.KEYCODE_MENU:
+          show();
+          player.setPlayWhenReady(!player.getPlayWhenReady());
+          break;
+        default:
+          break;
       }
     }
+    show();
     return true;
   }
 
@@ -1005,14 +1173,37 @@ public class PlayerControlView extends FrameLayout {
   }
 
   @SuppressLint("InlinedApi")
-  private static boolean isHandledMediaKey(int keyCode) {
-    return keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
-        || keyCode == KeyEvent.KEYCODE_MEDIA_REWIND
-        || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
-        || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY
-        || keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE
-        || keyCode == KeyEvent.KEYCODE_MEDIA_NEXT
-        || keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS;
+  private boolean isHandledMediaKey(int keyCode) {
+    if(!isVisible()){
+      return keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
+              || keyCode == KeyEvent.KEYCODE_MEDIA_REWIND
+              || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+              || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY
+              || keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE
+              || keyCode == KeyEvent.KEYCODE_DPAD_UP
+              || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+              || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+              || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+              || keyCode == KeyEvent.KEYCODE_MENU
+              || keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS
+              || keyCode == KeyEvent.KEYCODE_MEDIA_NEXT;
+    }else {
+      //VISIBLE
+      return keyCode ==     KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
+              || keyCode == KeyEvent.KEYCODE_MEDIA_REWIND
+              || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+              || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY
+              || keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE
+              || keyCode == KeyEvent.KEYCODE_PAGE_DOWN
+              || keyCode == KeyEvent.KEYCODE_PAGE_UP
+              || keyCode == KeyEvent.KEYCODE_DPAD_UP
+              || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+              || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+              || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+              || keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS
+              || keyCode == KeyEvent.KEYCODE_MENU
+              || keyCode == KeyEvent.KEYCODE_MEDIA_NEXT;
+    }
   }
 
   /**
@@ -1107,16 +1298,16 @@ public class PlayerControlView extends FrameLayout {
               playbackPreparer.preparePlayback();
             }
           } else if (player.getPlaybackState() == Player.STATE_ENDED) {
-            controlDispatcher.dispatchSeekTo(player, player.getCurrentWindowIndex(), C.TIME_UNSET);
+            //controlDispatcher.dispatchSeekTo(player, player.getCurrentWindowIndex(), C.TIME_UNSET);
           }
-          controlDispatcher.dispatchSetPlayWhenReady(player, true);
+          //controlDispatcher.dispatchSetPlayWhenReady(player, true);
         } else if (pauseButton == view) {
-          controlDispatcher.dispatchSetPlayWhenReady(player, false);
+          //controlDispatcher.dispatchSetPlayWhenReady(player, false);
         } else if (repeatToggleButton == view) {
-          controlDispatcher.dispatchSetRepeatMode(
-              player, RepeatModeUtil.getNextRepeatMode(player.getRepeatMode(), repeatToggleModes));
+          //controlDispatcher.dispatchSetRepeatMode(
+           //   player, RepeatModeUtil.getNextRepeatMode(player.getRepeatMode(), repeatToggleModes));
         } else if (shuffleButton == view) {
-          controlDispatcher.dispatchSetShuffleModeEnabled(player, !player.getShuffleModeEnabled());
+          //controlDispatcher.dispatchSetShuffleModeEnabled(player, !player.getShuffleModeEnabled());
         }
       }
     }
